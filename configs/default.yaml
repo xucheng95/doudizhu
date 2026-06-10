@@ -1,10 +1,10 @@
-d_model: 256
+d_model: 128
 d_action: 64
-num_layers: 4
+num_layers: 2
 num_heads: 4
-ff_dim: 512
+ff_dim: 256
 dropout: 0.1
-max_actions: 500
+max_actions: 100
 max_history: 60
 
 gamma: 0.99
@@ -14,8 +14,8 @@ value_coeff: 0.5
 entropy_coeff: 0.01
 lr: 3.0e-4
 max_grad_norm: 0.5
-ppo_epochs: 4
-batch_size: 256
+ppo_epochs: 2
+batch_size: 128
 
 num_workers: 4
 episodes_per_batch: 256
