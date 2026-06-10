@@ -51,6 +51,7 @@ def _worker_episodes(args: tuple) -> dict[str, list[dict]]:
         ep = _collect_one_episode(env, agents, cfg, device)
         for role, steps in ep.items():
             all_steps[role].extend(steps)
+    print(f"  [worker] done {n_eps} eps", flush=True)
     return all_steps
 
 
@@ -152,6 +153,7 @@ def _collect_sequential(agents, cfg, device, n_eps, opponent_agents):
 
 
 def _collect_parallel(agents, cfg, n_eps):
+    import time as _time
     n_workers = max(1, cfg.num_workers)
     state_dicts = {r: {k: v.cpu().clone() for k, v in agents[r].state_dict().items()}
                    for r in _ROLE_OF.values()}
@@ -161,13 +163,17 @@ def _collect_parallel(agents, cfg, n_eps):
     per_worker[-1] += n_eps % n_workers
 
     args_list = [(n, state_dicts, cfg) for n in per_worker if n > 0]
+    print(f"  spawning {len(args_list)} workers...", flush=True)
 
     all_steps = {"landlord": [], "peasant0": [], "peasant1": []}
+    t0 = _time.time()
     with ProcessPoolExecutor(max_workers=len(args_list)) as executor:
         futures = [executor.submit(_worker_episodes, args) for args in args_list]
         for f in as_completed(futures):
             result = f.result()
             for role in _ROLE_OF.values():
                 all_steps[role].extend(result[role])
+    elapsed = _time.time() - t0
+    print(f"  workers done in {elapsed:.1f}s", flush=True)
 
     return all_steps
