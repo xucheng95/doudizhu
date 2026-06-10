@@ -68,18 +68,11 @@ def _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0, cfg):
     """Fill buffer and run PPO for all roles in parallel processes."""
     from concurrent.futures import ProcessPoolExecutor
 
-    # GAE (fast, sequential)
-    for role in ROLES:
-        buffers[role].clear()
-        for step in all_steps[role]:
-            buffers[role].add(step)
-        buffers[role].compute_gae(last_value=torch.tensor(0.0))
-
-    # Prepare data for independent processes
+    # Prepare data for PPO workers (steps are passed raw, GAE computed in worker)
     args_list = []
     for role in ROLES:
         state_dict = {k: v.cpu() for k, v in agents[role].state_dict().items()}
-        steps_data = list(buffers[role]._steps)
+        steps_data = list(all_steps[role])
         args_list.append((role, state_dict, steps_data, cfg))
 
     # PPO in parallel processes
@@ -121,7 +114,6 @@ def train(cfg: TrainingConfig) -> None:
 
     agents = build_agents(cfg, device)
     updaters = {r: PPOUpdater(agents[r], cfg) for r in ROLES}
-    buffers = {r: RolloutBuffer(cfg) for r in ROLES}
     pool = HistoryPool(cfg)
     writer = SummaryWriter(cfg.log_dir)
 
