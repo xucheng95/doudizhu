@@ -1,4 +1,4 @@
-"""Main MAPPO training loop for Doudizhu — async double-buffered sampling."""
+"""Doudizhu MAPPO training — persistent workers for sampling + PPO."""
 from __future__ import annotations
 import sys, os, argparse, time, copy
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -7,31 +7,24 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, 'doudizhu', 'python'))
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from concurrent.futures import ProcessPoolExecutor
 
-from doudizhu_cpp import EnvConfig
 from training.config import TrainingConfig
 from training.model import DoudizhuAgent
-from training.buffer import RolloutBuffer
-from training.ppo import PPOUpdater
-from training.rollout import collect_batch, _worker_episodes, _collect_sequential, _ROLE_OF
+from training.workers import PersistentWorkers, ROLES
 from training.history_pool import HistoryPool
 from training.eval import evaluate
-
-ROLES = ["landlord", "peasant0", "peasant1"]
 
 
 def build_agents(cfg: TrainingConfig, device: torch.device) -> dict[str, DoudizhuAgent]:
     return {role: DoudizhuAgent(cfg).to(device) for role in ROLES}
 
 
-def save_checkpoint(agents: dict, updaters: dict, epoch: int, cfg: TrainingConfig) -> None:
+def save_checkpoint(agents: dict, epoch: int, cfg: TrainingConfig) -> None:
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     path = os.path.join(cfg.checkpoint_dir, f"epoch_{epoch:05d}.pt")
     torch.save({
         "epoch": epoch,
         "agents": {r: a.state_dict() for r, a in agents.items()},
-        "optimizers": {r: u.optimizer.state_dict() for r, u in updaters.items()},
     }, path)
     print(f"Checkpoint saved: {path}")
 
@@ -44,62 +37,6 @@ def _self_play_phase(epoch: int, cfg: TrainingConfig, pool: HistoryPool) -> floa
     return cfg.history_ratio_phase2
 
 
-def _ppo_worker(role_state_cfg: tuple) -> tuple[str, dict, float]:
-    """Top-level worker for parallel PPO (must be picklable)."""
-    role, state_dict, steps_data, cfg = role_state_cfg
-    device = torch.device("cpu")
-    agent = DoudizhuAgent(cfg).to(device)
-    agent.load_state_dict(state_dict)
-
-    buffer = RolloutBuffer(cfg)
-    for step in steps_data:
-        buffer.add(step)
-    buffer.compute_gae(last_value=torch.tensor(0.0))
-
-    updater = PPOUpdater(agent, cfg)
-    t1 = time.time()
-    metrics = updater.update(buffer)
-    dt = time.time() - t1
-
-    return role, metrics, agent.state_dict(), updater.optimizer.state_dict(), dt
-
-
-def _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0, cfg):
-    """Fill buffer and run PPO for all roles in parallel processes."""
-    from concurrent.futures import ProcessPoolExecutor
-
-    # Prepare data for PPO workers (steps are passed raw, GAE computed in worker)
-    args_list = []
-    for role in ROLES:
-        state_dict = {k: v.cpu() for k, v in agents[role].state_dict().items()}
-        steps_data = list(all_steps[role])
-        args_list.append((role, state_dict, steps_data, cfg))
-
-    # PPO in parallel processes
-    results = {}
-    with ProcessPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(_ppo_worker, args) for args in args_list]
-        for f in futures:
-            role, metrics, new_sd, opt_sd, dt = f.result()
-            agents[role].load_state_dict(new_sd)
-            updaters[role].optimizer.load_state_dict(opt_sd)
-            results[role] = (metrics, dt)
-
-    for role in ROLES:
-        metrics, dt = results[role]
-        writer.add_scalar(f"{role}/policy_loss", metrics["policy_loss"], epoch)
-        writer.add_scalar(f"{role}/value_loss", metrics["value_loss"], epoch)
-        writer.add_scalar(f"{role}/entropy", metrics["entropy"], epoch)
-        print(f"  PPO {role}... done ({dt:.1f}s)", flush=True)
-
-    elapsed = time.time() - t0
-    writer.add_scalar("train/epoch_time_s", elapsed, epoch)
-    steps = {r: len(all_steps.get(r, [])) for r in ROLES}
-    print(f"Epoch {epoch:5d} | {elapsed:.1f}s | steps: {steps} | "
-          f"p_loss={metrics['policy_loss']:.4f} v_loss={metrics['value_loss']:.4f} "
-          f"ent={metrics['entropy']:.3f}", flush=True)
-
-
 def train(cfg: TrainingConfig) -> None:
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -108,84 +45,65 @@ def train(cfg: TrainingConfig) -> None:
     else:
         device = torch.device("cpu")
     print(f"Training on {device}", flush=True)
-    print(f"Config: d_model={cfg.d_model}, layers={cfg.num_layers}, "
-          f"ep_per_batch={cfg.episodes_per_batch}, ppo_epochs={cfg.ppo_epochs}",
-          flush=True)
+    print(f"d_model={cfg.d_model}, layers={cfg.num_layers}, "
+          f"ep_per_batch={cfg.episodes_per_batch}", flush=True)
 
     agents = build_agents(cfg, device)
-    updaters = {r: PPOUpdater(agents[r], cfg) for r in ROLES}
     pool = HistoryPool(cfg)
     writer = SummaryWriter(cfg.log_dir)
 
-    # For parallel sampling: use a persistent ProcessPoolExecutor
-    n_workers = max(1, cfg.num_workers)
-    executor = ProcessPoolExecutor(max_workers=n_workers) if n_workers > 1 else None
-    pending_futures = []  # Futures for next batch being collected asynchronously
+    # --- persistent workers ---
+    workers = PersistentWorkers(cfg)
+    pending_sample = False
 
     for epoch in range(cfg.max_epochs):
         t0 = time.time()
 
-        # Build opponent agents (historical mix)
-        hist_ratio = _self_play_phase(epoch, cfg, pool)
-        opponent_agents = None
-        if hist_ratio > 0.0 and pool.size("landlord") > 0:
-            import random
-            opponent_agents = {}
-            for role in ROLES:
-                if random.random() < hist_ratio:
-                    hist_agent = DoudizhuAgent(cfg).to(device)
-                    pool.load_into(hist_agent, role)
-                    opponent_agents[role] = hist_agent
-                else:
-                    opponent_agents[role] = agents[role]
-
-        # Collect rollouts — use pending futures if available (async double-buffering)
-        if epoch > 0 and pending_futures:
-            print(f"Epoch {epoch}: waiting for batch...", end=" ", flush=True)
-            all_steps = {"landlord": [], "peasant0": [], "peasant1": []}
-            for f in pending_futures:
-                result = f.result()
-                for role in _ROLE_OF.values():
-                    all_steps[role].extend(result[role])
+        # ---- collect samples ----
+        if pending_sample:
+            all_steps = workers.collect_samples(cfg.num_workers)
+            pending_sample = False
         else:
-            print(f"Epoch {epoch}: collecting...", end=" ", flush=True)
-            all_steps = collect_batch(
-                agents, cfg, torch.device("cpu"),
-                n_episodes=cfg.episodes_per_batch,
-                opponent_agents=opponent_agents,
-            )
-
-        # Start prefetch BEFORE train (one-step stale, standard async PPO)
-        if executor is not None and n_workers > 1:
-            state_dicts = {r: {k: v.cpu().clone() for k, v in agents[r].state_dict().items()}
+            state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                            for r in ROLES}
-            per_worker = [cfg.episodes_per_batch // n_workers] * n_workers
-            per_worker[-1] += cfg.episodes_per_batch % n_workers
-            pending_futures = [
-                executor.submit(_worker_episodes, (n, state_dicts, cfg))
-                for n in per_worker if n > 0
-            ]
-            print(f"prefetch started", flush=True)
+            workers.submit_sample(cfg.episodes_per_batch, state_dicts, cfg)
+            all_steps = workers.collect_samples(cfg.num_workers)
 
-        # Train on current batch
-        _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0, cfg)
+        # ---- start prefetch for next epoch ----
+        state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
+                       for r in ROLES}
+        workers.submit_sample(cfg.episodes_per_batch, state_dicts, cfg)
+        pending_sample = True
 
-        # Evaluate
+        # ---- PPO (persistent workers, parallel per role) ----
+        for role in ROLES:
+            sd = {k: v.cpu() for k, v in agents[role].state_dict().items()}
+            steps_data = list(all_steps[role])
+            workers.submit_ppo(role, sd, steps_data, cfg)
+
+        for role in ROLES:
+            _, _, new_sd, _, dt = workers.collect_ppo(role)
+            agents[role].load_state_dict(new_sd)
+            print(f"  PPO {role}... done ({dt:.1f}s)", flush=True)
+
+        elapsed = time.time() - t0
+        steps = {r: len(all_steps.get(r, [])) for r in ROLES}
+        print(f"Epoch {epoch:5d} | {elapsed:.1f}s | steps: {steps}", flush=True)
+
+        # ---- evaluate ----
         if epoch % cfg.eval_interval == 0:
             result = evaluate(agents, cfg, n_games=200, device=device)
             writer.add_scalar("eval/landlord_win_rate", result["landlord_win_rate"], epoch)
             writer.add_scalar("eval/peasant_win_rate", result["peasant_win_rate"], epoch)
-            writer.add_scalar("eval/avg_game_length", result["avg_game_length"], epoch)
             print(f"Epoch {epoch:5d} | landlord_wr={result['landlord_win_rate']:.3f}")
 
-        # Checkpoint + history pool
+        # ---- checkpoint ----
         if epoch % cfg.checkpoint_interval == 0:
-            save_checkpoint(agents, updaters, epoch, cfg)
+            save_checkpoint(agents, epoch, cfg)
             for role in ROLES:
                 pool.save(epoch, role, copy.deepcopy(agents[role].state_dict()))
 
-    if executor is not None:
-        executor.shutdown()
+    workers.shutdown()
     writer.close()
     print("Training complete.")
 
