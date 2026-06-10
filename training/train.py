@@ -47,7 +47,10 @@ def _self_play_phase(epoch: int, cfg: TrainingConfig, pool: HistoryPool) -> floa
 
 def train(cfg: TrainingConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training on {device}")
+    print(f"Training on {device}", flush=True)
+    print(f"Config: d_model={cfg.d_model}, layers={cfg.num_layers}, "
+          f"ep_per_batch={cfg.episodes_per_batch}, ppo_epochs={cfg.ppo_epochs}",
+          flush=True)
 
     agents = build_agents(cfg, device)
     updaters = {r: PPOUpdater(agents[r], cfg) for r in ROLES}
@@ -96,6 +99,12 @@ def train(cfg: TrainingConfig) -> None:
 
         elapsed = time.time() - t0
         writer.add_scalar("train/epoch_time_s", elapsed, epoch)
+
+        # Print progress every epoch
+        steps = {r: len(all_steps.get(r, [])) for r in ROLES}
+        print(f"Epoch {epoch:5d} | {elapsed:.1f}s | steps: {steps} | "
+              f"p_loss={metrics['policy_loss']:.4f} v_loss={metrics['value_loss']:.4f} "
+              f"ent={metrics['entropy']:.3f}", flush=True)
 
         # Evaluate
         if epoch % cfg.eval_interval == 0:
