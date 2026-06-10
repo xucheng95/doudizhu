@@ -1,0 +1,6 @@
+gymnasium>=1.0
+numpy>=1.21
+torch>=2.0
+pybind11>=2.10
+tensorboard>=2.14
+pyyaml>=6.0
