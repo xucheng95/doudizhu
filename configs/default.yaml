@@ -1,0 +1,37 @@
+d_model: 256
+d_action: 64
+num_layers: 4
+num_heads: 4
+ff_dim: 512
+dropout: 0.1
+max_actions: 500
+max_history: 60
+
+gamma: 0.99
+gae_lambda: 0.95
+clip_eps: 0.2
+value_coeff: 0.5
+entropy_coeff: 0.01
+lr: 3.0e-4
+max_grad_norm: 0.5
+ppo_epochs: 4
+batch_size: 256
+
+num_workers: 8
+episodes_per_batch: 256
+
+max_epochs: 10000
+eval_interval: 50
+checkpoint_interval: 100
+checkpoint_dir: checkpoints
+log_dir: runs/doudizhu
+
+history_pool_max_size: 100
+history_pool_start_epoch: 500
+history_ratio_phase2: 0.2
+history_ratio_phase3: 0.5
+
+landlord_win_reward: 2.0
+landlord_lose_reward: -2.0
+peasant_win_reward: 1.0
+peasant_lose_reward: -1.0
