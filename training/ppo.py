@@ -29,7 +29,7 @@ class PPOUpdater:
     def update(self, buffer: RolloutBuffer) -> dict:
         """Run ppo_epochs of mini-batch updates. Clears buffer at end."""
         total_policy, total_value, total_entropy, n = 0.0, 0.0, 0.0, 0
-        for _ in range(self.cfg.ppo_epochs):
+        for ep in range(self.cfg.ppo_epochs):
             for batch in buffer.iterate(self.cfg.batch_size):
                 m = self._update_batch(batch)
                 total_policy += m.policy_loss
