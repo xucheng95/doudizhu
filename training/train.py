@@ -97,13 +97,15 @@ def train(cfg: TrainingConfig) -> None:
 
         # PPO updates
         for role in ROLES:
+            t0 = time.time()
             print(f"  PPO {role}...", end=" ", flush=True)
             metrics = updaters[role].update(buffers[role])
+            dt = time.time() - t0
             writer.add_scalar(f"{role}/policy_loss", metrics["policy_loss"], epoch)
             writer.add_scalar(f"{role}/value_loss", metrics["value_loss"], epoch)
             writer.add_scalar(f"{role}/entropy", metrics["entropy"], epoch)
             updaters[role].step_scheduler()
-            print("done", flush=True)
+            print(f"done ({dt:.1f}s)", flush=True)
 
         elapsed = time.time() - t0
         writer.add_scalar("train/epoch_time_s", elapsed, epoch)
