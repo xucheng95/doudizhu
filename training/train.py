@@ -54,26 +54,17 @@ def train(cfg: TrainingConfig) -> None:
 
     # --- persistent workers ---
     workers = PersistentWorkers(cfg)
-    pending_sample = False
 
     for epoch in range(cfg.max_epochs):
         t0 = time.time()
 
         # ---- collect samples ----
-        if pending_sample:
-            all_steps = workers.collect_work()
-            pending_sample = False
-        else:
-            state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
-                           for r in ROLES}
-            workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
-            all_steps = workers.collect_work()
-
-        # ---- start prefetch for next epoch ----
+        print(f"  sampling...", end=" ", flush=True)
         state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                        for r in ROLES}
         workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
-        pending_sample = True
+        all_steps = workers.collect_work()
+        print(f"done", flush=True)
 
         # ---- PPO (persistent learners, parallel per role) ----
         for role in ROLES:
