@@ -44,9 +44,29 @@ def _self_play_phase(epoch: int, cfg: TrainingConfig, pool: HistoryPool) -> floa
     return cfg.history_ratio_phase2
 
 
-def _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0):
-    """Fill buffer from all_steps and run PPO for all roles in parallel threads."""
-    from concurrent.futures import ThreadPoolExecutor
+def _ppo_worker(role_state_cfg: tuple) -> tuple[str, dict, float]:
+    """Top-level worker for parallel PPO (must be picklable)."""
+    role, state_dict, steps_data, cfg = role_state_cfg
+    device = torch.device("cpu")
+    agent = DoudizhuAgent(cfg).to(device)
+    agent.load_state_dict(state_dict)
+
+    buffer = RolloutBuffer(cfg)
+    for step in steps_data:
+        buffer.add(step)
+    buffer.compute_gae(last_value=torch.tensor(0.0))
+
+    updater = PPOUpdater(agent, cfg)
+    t1 = time.time()
+    metrics = updater.update(buffer)
+    dt = time.time() - t1
+
+    return role, metrics, agent.state_dict(), updater.optimizer.state_dict(), dt
+
+
+def _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0, cfg):
+    """Fill buffer and run PPO for all roles in parallel processes."""
+    from concurrent.futures import ProcessPoolExecutor
 
     # GAE (fast, sequential)
     for role in ROLES:
@@ -55,26 +75,29 @@ def _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0):
             buffers[role].add(step)
         buffers[role].compute_gae(last_value=torch.tensor(0.0))
 
-    # PPO in parallel threads
-    results = {}
-    def _ppo_one(role):
-        t1 = time.time()
-        print(f"  PPO {role}...", end=" ", flush=True)
-        metrics = updaters[role].update(buffers[role])
-        dt = time.time() - t1
-        updaters[role].step_scheduler()
-        results[role] = (metrics, dt)
+    # Prepare data for independent processes
+    args_list = []
+    for role in ROLES:
+        state_dict = {k: v.cpu() for k, v in agents[role].state_dict().items()}
+        steps_data = list(buffers[role]._steps)
+        args_list.append((role, state_dict, steps_data, cfg))
 
-    with ThreadPoolExecutor(max_workers=3) as tpe:
-        for role in ROLES:
-            tpe.submit(_ppo_one, role)
+    # PPO in parallel processes
+    results = {}
+    with ProcessPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_ppo_worker, args) for args in args_list]
+        for f in futures:
+            role, metrics, new_sd, opt_sd, dt = f.result()
+            agents[role].load_state_dict(new_sd)
+            updaters[role].optimizer.load_state_dict(opt_sd)
+            results[role] = (metrics, dt)
 
     for role in ROLES:
         metrics, dt = results[role]
         writer.add_scalar(f"{role}/policy_loss", metrics["policy_loss"], epoch)
         writer.add_scalar(f"{role}/value_loss", metrics["value_loss"], epoch)
         writer.add_scalar(f"{role}/entropy", metrics["entropy"], epoch)
-        print(f"done ({dt:.1f}s)", flush=True)
+        print(f"  PPO {role}... done ({dt:.1f}s)", flush=True)
 
     elapsed = time.time() - t0
     writer.add_scalar("train/epoch_time_s", elapsed, epoch)
@@ -157,7 +180,7 @@ def train(cfg: TrainingConfig) -> None:
             print("", flush=True)
 
         # Train on current batch
-        _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0)
+        _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0, cfg)
 
         # Evaluate
         if epoch % cfg.eval_interval == 0:
