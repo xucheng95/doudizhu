@@ -80,6 +80,7 @@ def train(cfg: TrainingConfig) -> None:
 
         # ---- PPO + prefetch overlap ----
         # Submit next batch BEFORE training (workers sample while learners train)
+        print(f"  worker+learner parallel...", end=" ", flush=True)
         state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                        for r in ROLES}
         workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
