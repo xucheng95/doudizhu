@@ -69,18 +69,18 @@ def train(cfg: TrainingConfig) -> None:
         t0 = time.time()
 
         # ---- collect samples (wait for prefetched batch from previous epoch) ----
+        t_collect = time.time()
         if epoch > 0:
             all_steps = workers.collect_work()
         else:
-            # First epoch: collect synchronously
             state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                            for r in ROLES}
             workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
             all_steps = workers.collect_work()
+        dt_collect = time.time() - t_collect
 
         # ---- PPO + prefetch overlap ----
-        # Submit next batch BEFORE training (workers sample while learners train)
-        print(f"  worker+learner parallel...", end=" ", flush=True)
+        t_overlap = time.time()
         state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                        for r in ROLES}
         workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
@@ -90,10 +90,14 @@ def train(cfg: TrainingConfig) -> None:
             steps_data = list(all_steps[role])
             workers.submit_learn(role, sd, steps_data, cfg)
 
+        t_learn = time.time()
         for role in ROLES:
             _, _, new_sd, _, dt = workers.collect_learn(role)
             agents[role].load_state_dict(new_sd)
-            print(f"  PPO {role}... done ({dt:.1f}s)", flush=True)
+        dt_learn = time.time() - t_learn
+
+        print(f"  collect={dt_collect:.1f}s submit+learn={dt_learn:.1f}s "
+              f"PPO={max(dt_learn,0):.1f}s", flush=True)
 
         elapsed = time.time() - t0
         steps = {r: len(all_steps.get(r, [])) for r in ROLES}
