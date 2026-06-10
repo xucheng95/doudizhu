@@ -44,23 +44,36 @@ def _self_play_phase(epoch: int, cfg: TrainingConfig, pool: HistoryPool) -> floa
     return cfg.history_ratio_phase2
 
 
-def _run_sequential_train(agents, buffers, all_steps, updaters, epoch, writer, t0):
-    """Fill buffer from all_steps and run PPO."""
+def _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0):
+    """Fill buffer from all_steps and run PPO for all roles in parallel threads."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    # GAE (fast, sequential)
     for role in ROLES:
         buffers[role].clear()
         for step in all_steps[role]:
             buffers[role].add(step)
         buffers[role].compute_gae(last_value=torch.tensor(0.0))
 
-    for role in ROLES:
+    # PPO in parallel threads
+    results = {}
+    def _ppo_one(role):
         t1 = time.time()
         print(f"  PPO {role}...", end=" ", flush=True)
         metrics = updaters[role].update(buffers[role])
         dt = time.time() - t1
+        updaters[role].step_scheduler()
+        results[role] = (metrics, dt)
+
+    with ThreadPoolExecutor(max_workers=3) as tpe:
+        for role in ROLES:
+            tpe.submit(_ppo_one, role)
+
+    for role in ROLES:
+        metrics, dt = results[role]
         writer.add_scalar(f"{role}/policy_loss", metrics["policy_loss"], epoch)
         writer.add_scalar(f"{role}/value_loss", metrics["value_loss"], epoch)
         writer.add_scalar(f"{role}/entropy", metrics["entropy"], epoch)
-        updaters[role].step_scheduler()
         print(f"done ({dt:.1f}s)", flush=True)
 
     elapsed = time.time() - t0
@@ -144,7 +157,7 @@ def train(cfg: TrainingConfig) -> None:
             print("", flush=True)
 
         # Train on current batch
-        _run_sequential_train(agents, buffers, all_steps, updaters, epoch, writer, t0)
+        _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0)
 
         # Evaluate
         if epoch % cfg.eval_interval == 0:
