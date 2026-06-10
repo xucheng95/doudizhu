@@ -38,13 +38,18 @@ class RolloutBuffer:
 
     def iterate(self, batch_size: int) -> Iterator[dict]:
         assert self.advantages is not None, "Call compute_gae() before iterate()"
-        T = len(self._steps)
-        indices = torch.randperm(T)
-        adv_shuffled = self.advantages[indices]
+        # Only train on steps where agent had a choice (num_legal > 1)
+        trainable = [i for i, s in enumerate(self._steps) if s["num_legal"].item() > 1]
+        if not trainable:
+            return
+        T = len(trainable)
+        perm = torch.randperm(T)
+        adv_shuffled = self.advantages[trainable][perm]
         adv_norm = (adv_shuffled - adv_shuffled.mean()) / (adv_shuffled.std() + 1e-8)
 
         for start in range(0, T, batch_size):
-            idx = indices[start:start + batch_size]
+            batch_perm = perm[start:start + batch_size]
+            idx = [trainable[p] for p in batch_perm]
             steps = [self._steps[i] for i in idx]
             adv_batch = adv_norm[start:start + batch_size]
 
