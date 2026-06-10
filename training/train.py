@@ -80,10 +80,11 @@ def train(cfg: TrainingConfig) -> None:
                 else:
                     opponent_agents[role] = agents[role]
 
-        # Collect rollouts (CPU for C++ env sync; workers infer on CPU)
+        # Collect rollouts
         print(f"Epoch {epoch}: collecting...", end=" ", flush=True)
+        roll_device = device if cfg.num_workers <= 1 else torch.device("cpu")
         all_steps = collect_batch(
-            agents, cfg, torch.device("cpu"),
+            agents, cfg, roll_device,
             n_episodes=cfg.episodes_per_batch,
             opponent_agents=opponent_agents,
         )
