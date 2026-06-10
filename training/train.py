@@ -80,9 +80,9 @@ def train(cfg: TrainingConfig) -> None:
                 else:
                     opponent_agents[role] = agents[role]
 
-        # Collect rollouts
+        # Collect rollouts (CPU for C++ env sync; workers infer on CPU)
         all_steps = collect_batch(
-            agents, cfg, device,
+            agents, cfg, torch.device("cpu"),
             n_episodes=cfg.episodes_per_batch,
             opponent_agents=opponent_agents,
         )
