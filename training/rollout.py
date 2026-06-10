@@ -33,8 +33,9 @@ def _worker_episodes(args: tuple) -> dict[str, list[dict]]:
     # Each worker imports its own env (C++ cannot be pickled)
     from doudizhu_cpp import EnvConfig as EC
     from env_wrapper import DoudizhuGymEnv as GE
-    env = GE(config=EC())
-    env._env.config.self_play = True
+    ec = EC()
+    ec.self_play = True
+    env = GE(config=ec)
 
     device = torch.device("cpu")
     agents = {
@@ -133,8 +134,9 @@ def cpu_device():
 
 def _collect_sequential(agents, cfg, device, n_eps, opponent_agents):
     all_steps = {"landlord": [], "peasant0": [], "peasant1": []}
-    env = DoudizhuGymEnv(config=EnvConfig())
-    env._env.config.self_play = True
+    ec = EnvConfig()
+    ec.self_play = True
+    env = DoudizhuGymEnv(config=ec)
     for _ in range(n_eps):
         ep = _collect_one_episode(env, agents, cfg, device)
         for role, steps in ep.items():
