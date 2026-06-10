@@ -163,10 +163,8 @@ def train(cfg: TrainingConfig) -> None:
                 opponent_agents=opponent_agents,
             )
 
-        # Start next batch BEFORE training (on-policy: same weights for both)
-        print(f"prefetching next batch...", end=" ", flush=True)
+        # Start prefetch BEFORE train (one-step stale, standard async PPO)
         if executor is not None and n_workers > 1:
-            # Prepare state_dicts for workers
             state_dicts = {r: {k: v.cpu().clone() for k, v in agents[r].state_dict().items()}
                            for r in ROLES}
             per_worker = [cfg.episodes_per_batch // n_workers] * n_workers
@@ -175,9 +173,7 @@ def train(cfg: TrainingConfig) -> None:
                 executor.submit(_worker_episodes, (n, state_dicts, cfg))
                 for n in per_worker if n > 0
             ]
-            print(f"started {len(pending_futures)} workers", flush=True)
-        else:
-            print("", flush=True)
+            print(f"prefetch started", flush=True)
 
         # Train on current batch
         _run_train(agents, buffers, all_steps, updaters, epoch, writer, t0, cfg)
