@@ -15,6 +15,16 @@ from training.history_pool import HistoryPool
 from training.eval import evaluate
 
 
+def _eval_worker(state_dicts: dict, cfg, epoch: int, device):
+    """Background eval — loads model, runs games, prints result."""
+    agents = {r: DoudizhuAgent(cfg).to(device) for r in ROLES}
+    for r in ROLES:
+        agents[r].load_state_dict(state_dicts[r])
+    result = evaluate(agents, cfg, n_games=200, device=device)
+    print(f"  [eval epoch {epoch}] landlord_wr={result['landlord_win_rate']:.3f} "
+          f"(avg_len={result['avg_game_length']:.0f})", flush=True)
+
+
 def build_agents(cfg: TrainingConfig, device: torch.device) -> dict[str, DoudizhuAgent]:
     return {role: DoudizhuAgent(cfg).to(device) for role in ROLES}
 
@@ -81,14 +91,14 @@ def train(cfg: TrainingConfig) -> None:
         steps = {r: len(all_steps.get(r, [])) for r in ROLES}
         print(f"Epoch {epoch:5d} | {elapsed:.1f}s | steps: {steps}", flush=True)
 
-        # ---- evaluate ----
+        # ---- evaluate (background process, non-blocking) ----
         if epoch % cfg.eval_interval == 0:
-            print(f"  eval 200 games...", end=" ", flush=True)
-            result = evaluate(agents, cfg, n_games=200, device=device)
-            writer.add_scalar("eval/landlord_win_rate", result["landlord_win_rate"], epoch)
-            writer.add_scalar("eval/peasant_win_rate", result["peasant_win_rate"], epoch)
-            print(f"landlord_wr={result['landlord_win_rate']:.3f} "
-                  f"(avg_len={result['avg_game_length']:.0f})", flush=True)
+            print(f"  starting background eval...", flush=True)
+            sd = {r: {k: v.cpu().clone() for k, v in agents[r].state_dict().items()}
+                  for r in ROLES}
+            ctx = __import__('torch').multiprocessing.get_context("spawn")
+            p = ctx.Process(target=_eval_worker, args=(sd, cfg, epoch, device))
+            p.start()
 
         # ---- checkpoint ----
         if epoch % cfg.checkpoint_interval == 0:
