@@ -48,12 +48,8 @@ def _self_play_phase(epoch: int, cfg: TrainingConfig, pool: HistoryPool) -> floa
 
 
 def train(cfg: TrainingConfig) -> None:
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = torch.device("cpu")
+    # MPS slower than CPU for small models (kernel launch overhead)
     print(f"Training on {device}", flush=True)
     print(f"d_model={cfg.d_model}, layers={cfg.num_layers}, "
           f"ep_per_batch={cfg.episodes_per_batch}", flush=True)
