@@ -149,6 +149,7 @@ PYBIND11_MODULE(doudizhu_cpp, m) {
         .def("current_player", &dd::Game::current_player)
         .def("winner", &dd::Game::winner)
         .def("reward", &dd::Game::reward, py::arg("player"))
+        .def("role", &dd::Game::role, py::arg("player"))
         .def("get_observation", &dd::Game::get_observation, py::arg("player"))
         .def("play_history", &dd::Game::play_history)
         .def("last_move", &dd::Game::last_move, py::return_value_policy::reference_internal)
