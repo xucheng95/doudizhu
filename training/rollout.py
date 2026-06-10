@@ -64,8 +64,12 @@ def _collect_one_episode(env, agents, cfg, device):
     done = False
     trajectories = {r: [] for r in _ROLE_OF.values()}
 
+    max_steps = 500
     with torch.no_grad():
         while not done:
+            if len(trajectories.get("landlord", [])) + len(trajectories.get("peasant0", [])) + len(trajectories.get("peasant1", [])) > max_steps:
+                print(f"WARN: episode exceeded {max_steps} total steps, breaking", flush=True)
+                break
             player_idx = env._env.game.current_player()
             role_key = _ROLE_OF[player_idx]
             agent = agents[role_key]
