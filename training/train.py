@@ -61,28 +61,28 @@ def train(cfg: TrainingConfig) -> None:
 
         # ---- collect samples ----
         if pending_sample:
-            all_steps = workers.collect_samples(cfg.num_workers)
+            all_steps = workers.collect_work()
             pending_sample = False
         else:
             state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                            for r in ROLES}
-            workers.submit_sample(cfg.episodes_per_batch, state_dicts, cfg)
-            all_steps = workers.collect_samples(cfg.num_workers)
+            workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
+            all_steps = workers.collect_work()
 
         # ---- start prefetch for next epoch ----
         state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                        for r in ROLES}
-        workers.submit_sample(cfg.episodes_per_batch, state_dicts, cfg)
+        workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
         pending_sample = True
 
-        # ---- PPO (persistent workers, parallel per role) ----
+        # ---- PPO (persistent learners, parallel per role) ----
         for role in ROLES:
             sd = {k: v.cpu() for k, v in agents[role].state_dict().items()}
             steps_data = list(all_steps[role])
-            workers.submit_ppo(role, sd, steps_data, cfg)
+            workers.submit_learn(role, sd, steps_data, cfg)
 
         for role in ROLES:
-            _, _, new_sd, _, dt = workers.collect_ppo(role)
+            _, _, new_sd, _, dt = workers.collect_learn(role)
             agents[role].load_state_dict(new_sd)
             print(f"  PPO {role}... done ({dt:.1f}s)", flush=True)
 

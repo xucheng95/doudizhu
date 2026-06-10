@@ -1,9 +1,9 @@
-"""Persistent worker processes for PPO training and sampling.
+"""Persistent processes: learners (PPO training) and workers (sampling).
 
-- PPO workers: one per role (landlord/peasant0/peasant1), created once, reuse model/buffer
-- Sampling workers: create env once, reuse across epochs
+- Learners: one per role (landlord/peasant0/peasant1), created once, reuse model/buffer
+- Workers: create env once, reuse across epochs
 
-Communication via multiprocessing.Queue / Pipe.
+Communication via multiprocessing.Queue.
 """
 
 from __future__ import annotations
@@ -28,11 +28,11 @@ ROLES = ["landlord", "peasant0", "peasant1"]
 
 
 # ============================================================
-# Persistent PPO Worker
+# Persistent Learner (PPO)
 # ============================================================
 
-def _ppo_worker_loop(role: str, task_queue: mp.Queue, result_queue: mp.Queue):
-    """Persistent PPO worker: creates agent once, handles tasks in a loop."""
+def _learner_loop(role: str, task_queue: mp.Queue, result_queue: mp.Queue):
+    """Persistent learner: creates agent once, handles tasks in a loop."""
     # Dummy cfg — actual cfg sent with each task
     agent = None
     buffer = None
@@ -72,11 +72,11 @@ def _ppo_worker_loop(role: str, task_queue: mp.Queue, result_queue: mp.Queue):
 
 
 # ============================================================
-# Persistent Sampling Worker
+# Persistent Worker (sampling)
 # ============================================================
 
-def _sample_worker_loop(task_queue: mp.Queue, result_queue: mp.Queue):
-    """Persistent sampling worker: creates env+model once, handles tasks in loop."""
+def _worker_loop(task_queue: mp.Queue, result_queue: mp.Queue):
+    """Persistent worker: creates env+model once, handles tasks in loop."""
     from doudizhu_cpp import EnvConfig as EC
     from env_wrapper import DoudizhuGymEnv as GE
 
@@ -118,65 +118,64 @@ def _sample_worker_loop(task_queue: mp.Queue, result_queue: mp.Queue):
 # ============================================================
 
 class PersistentWorkers:
-    """Manages persistent PPO (3) and sampling (N) workers."""
+    """Manages persistent learners (3) and workers (N) for async training."""
 
     def __init__(self, cfg: TrainingConfig):
         self.cfg = cfg
-        self.n_samplers = max(1, cfg.num_workers)
+        self.n_workers = max(1, cfg.num_workers)
         ctx = mp.get_context("spawn")
 
-        # PPO workers (one per role)
-        self._ppo_tasks = {r: ctx.Queue() for r in ROLES}
-        self._ppo_results = {r: ctx.Queue() for r in ROLES}
-        self._ppo_procs = []
+        # Learners — one per role
+        self._learner_tasks = {r: ctx.Queue() for r in ROLES}
+        self._learner_results = {r: ctx.Queue() for r in ROLES}
+        self._learner_procs = []
         for role in ROLES:
-            p = ctx.Process(target=_ppo_worker_loop,
-                            args=(role, self._ppo_tasks[role], self._ppo_results[role]))
+            p = ctx.Process(target=_learner_loop,
+                            args=(role, self._learner_tasks[role], self._learner_results[role]))
             p.start()
-            self._ppo_procs.append(p)
+            self._learner_procs.append(p)
 
-        # Sampling workers
-        self._sample_tasks = ctx.Queue()
-        self._sample_results = ctx.Queue()
-        self._sample_procs = []
-        for _ in range(self.n_samplers):
-            p = ctx.Process(target=_sample_worker_loop,
-                            args=(self._sample_tasks, self._sample_results))
+        # Workers — sampling
+        self._worker_tasks = ctx.Queue()
+        self._worker_results = ctx.Queue()
+        self._worker_procs = []
+        for _ in range(self.n_workers):
+            p = ctx.Process(target=_worker_loop,
+                            args=(self._worker_tasks, self._worker_results))
             p.start()
-            self._sample_procs.append(p)
+            self._worker_procs.append(p)
 
-    def submit_sample(self, n_eps: int, state_dicts: dict, cfg: TrainingConfig):
-        """Send sampling tasks to all workers, return list of futures (queues to read)."""
-        per_worker = [n_eps // self.n_samplers] * self.n_samplers
-        per_worker[-1] += n_eps % self.n_samplers
+    def submit_work(self, n_eps: int, state_dicts: dict, cfg: TrainingConfig):
+        """Distribute sampling tasks to all workers."""
+        per_worker = [n_eps // self.n_workers] * self.n_workers
+        per_worker[-1] += n_eps % self.n_workers
         for n in per_worker:
             if n > 0:
-                self._sample_tasks.put((n, state_dicts, cfg))
-        return self._sample_results
+                self._worker_tasks.put((n, state_dicts, cfg))
 
-    def collect_samples(self, n_workers: int) -> dict:
-        """Collect results from N sampling workers, merge into one dict."""
+    def collect_work(self) -> dict:
+        """Collect sampling results from all workers, merge."""
         all_steps = {"landlord": [], "peasant0": [], "peasant1": []}
-        for _ in range(max(1, n_workers)):
-            result = self._sample_results.get()
+        for _ in range(self.n_workers):
+            result = self._worker_results.get()
             for role in _ROLE_OF.values():
                 all_steps[role].extend(result[role])
         return all_steps
 
-    def submit_ppo(self, role: str, state_dict: dict, steps_data: list, cfg: TrainingConfig):
-        """Send PPO task to one role worker."""
-        self._ppo_tasks[role].put((state_dict, steps_data, cfg))
+    def submit_learn(self, role: str, state_dict: dict, steps_data: list, cfg: TrainingConfig):
+        """Send training task to one learner."""
+        self._learner_tasks[role].put((state_dict, steps_data, cfg))
 
-    def collect_ppo(self, role: str) -> tuple:
-        """Wait for PPO result from one role worker."""
-        return self._ppo_results[role].get()
+    def collect_learn(self, role: str) -> tuple:
+        """Wait for training result from one learner."""
+        return self._learner_results[role].get()
 
     def shutdown(self):
         for role in ROLES:
-            self._ppo_tasks[role].put(None)
-        for _ in self._sample_procs:
-            self._sample_tasks.put(None)
-        for p in self._ppo_procs + self._sample_procs:
+            self._learner_tasks[role].put(None)
+        for _ in self._worker_procs:
+            self._worker_tasks.put(None)
+        for p in self._learner_procs + self._worker_procs:
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
