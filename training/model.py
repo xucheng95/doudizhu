@@ -37,7 +37,8 @@ class StateEncoder(nn.Module):
             dim_feedforward=cfg.ff_dim, dropout=cfg.dropout,
             batch_first=True, norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=cfg.num_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=cfg.num_layers,
+                                                  enable_nested_tensor=False)
 
     def forward(
         self,
