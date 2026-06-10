@@ -121,11 +121,12 @@ def collect_batch(
     n_episodes: int,
     opponent_agents: dict[str, DoudizhuAgent] | None = None,
 ) -> dict[str, list[dict]]:
-    """Collect n_episodes using cfg.num_workers parallel processes."""
+    """Collect n_episodes. Parallel if cfg.num_workers > 1."""
     n_workers = max(1, cfg.num_workers)
-    if n_workers == 1 or n_episodes <= 1:
-        return _collect_sequential(agents, cfg, device, n_episodes, opponent_agents)
-    return _collect_parallel(agents, cfg, n_episodes)
+    if n_workers > 1 and n_episodes > 1:
+        print(f"  Rolling out {n_episodes} episodes with {n_workers} workers...", flush=True)
+        return _collect_parallel(agents, cfg, n_episodes)
+    return _collect_sequential(agents, cfg, device, n_episodes, opponent_agents)
 
 
 def cpu_device():
@@ -137,10 +138,12 @@ def _collect_sequential(agents, cfg, device, n_eps, opponent_agents):
     ec = EnvConfig()
     ec.self_play = True
     env = DoudizhuGymEnv(config=ec)
-    for _ in range(n_eps):
+    for i in range(n_eps):
         ep = _collect_one_episode(env, agents, cfg, device)
         for role, steps in ep.items():
             all_steps[role].extend(steps)
+        if (i + 1) % 50 == 0:
+            print(f"  rollout {i+1}/{n_eps} episodes", flush=True)
     return all_steps
 
 
