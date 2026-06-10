@@ -68,15 +68,22 @@ def train(cfg: TrainingConfig) -> None:
     for epoch in range(cfg.max_epochs):
         t0 = time.time()
 
-        # ---- collect samples ----
-        print(f"  sampling...", end=" ", flush=True)
+        # ---- collect samples (wait for prefetched batch from previous epoch) ----
+        if epoch > 0:
+            all_steps = workers.collect_work()
+        else:
+            # First epoch: collect synchronously
+            state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
+                           for r in ROLES}
+            workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
+            all_steps = workers.collect_work()
+
+        # ---- PPO + prefetch overlap ----
+        # Submit next batch BEFORE training (workers sample while learners train)
         state_dicts = {r: {k: v.cpu() for k, v in agents[r].state_dict().items()}
                        for r in ROLES}
         workers.submit_work(cfg.episodes_per_batch, state_dicts, cfg)
-        all_steps = workers.collect_work()
-        print(f"done", flush=True)
 
-        # ---- PPO (persistent learners, parallel per role) ----
         for role in ROLES:
             sd = {k: v.cpu() for k, v in agents[role].state_dict().items()}
             steps_data = list(all_steps[role])
