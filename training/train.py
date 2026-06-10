@@ -83,10 +83,12 @@ def train(cfg: TrainingConfig) -> None:
 
         # ---- evaluate ----
         if epoch % cfg.eval_interval == 0:
+            print(f"  eval 200 games...", end=" ", flush=True)
             result = evaluate(agents, cfg, n_games=200, device=device)
             writer.add_scalar("eval/landlord_win_rate", result["landlord_win_rate"], epoch)
             writer.add_scalar("eval/peasant_win_rate", result["peasant_win_rate"], epoch)
-            print(f"Epoch {epoch:5d} | landlord_wr={result['landlord_win_rate']:.3f}")
+            print(f"landlord_wr={result['landlord_win_rate']:.3f} "
+                  f"(avg_len={result['avg_game_length']:.0f})", flush=True)
 
         # ---- checkpoint ----
         if epoch % cfg.checkpoint_interval == 0:
